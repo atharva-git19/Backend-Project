@@ -5,46 +5,43 @@ import { DB_NAME } from "./constants.js";
 dotenv.config();
 
 import connectDB from "./db/index.js";
+import { app } from "./app.js";
+
 /*
-const app = express()
     (async () => {
         try {
             await mongoose.connect(`${process.env.MONGODB_URI}/${DB_NAME}`);
 
             app.on("ERROR", (error) => {
                 console.log("ERROR :", error);
-                throw error
-            })
-            
+                throw error;
+            });
+
             app.listen(process.env.PORT, () => {
                 console.log(`app is listening on port: ${process.env.PORT}`);
-            })
-
+            });
         } catch (error) {
             console.error("ERROR: ", error);
-            throw err
+            throw error;
         }
-        
+    })();
 
-    })()
-    this is example of connecting database via main index file but its clusterd with other code so we use diff folder of DB
-    in there we creat diff file to connect to database and then export to use
+    This is an example of connecting the database from the main index file, but it
+    clusters other concerns, so we use a separate db folder: a dedicated file to
+    connect and export for reuse.
 */
 connectDB()
-    .then(() => {
-        app.on("error", (error) => {
-            console.log("error", error);
-            throw error
-            
-        });// app.on is generally not necessary only to learn (use is to catch app level error form express)
-        const port = process.env.PORT || 8000
-        app.listen(port, () => {
-            console.log(`server is running at ${port}`);
-            
-        });
-    })
-    .catch((err) => {
-        console.log("MongoDB connection Failed!", err);
-        process.exit(1);
-        
+  .then(() => {
+    app.on("error", (error) => {
+      console.log("error", error);
+      throw error;
+    }); // app.on is optional — mainly for learning (catch app-level errors from Express)
+    const port = process.env.PORT || 8000;
+    app.listen(port, () => {
+      console.log(`server is running at ${port}`);
     });
+  })
+  .catch((err) => {
+    console.log("MongoDB connection Failed!", err);
+    process.exit(1);
+  });

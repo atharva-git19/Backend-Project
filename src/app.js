@@ -1,6 +1,5 @@
 import express from "express";
-import cors from "cors"
-import cookieparser from "cookie-parser"
+import cors from "cors";
 import cookieParser from "cookie-parser";
 
 const app = express()
@@ -14,6 +13,12 @@ app.use(express.json({ limit: "16kb" }))
 app.use(express.urlencoded({ extended: true, limit: "16kb" }))
 app.use(express.static("public")) //to store public assets (ps. public is just folder name can be anything)
 app.use(cookieParser())
+
+// routes imports
+import userRouter from './routes/user.routes.js'
+
+// route Deceleration
+app.use("/api/v1/users",userRouter)
 
 
 export { app }
