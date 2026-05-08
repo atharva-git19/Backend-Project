@@ -263,77 +263,143 @@ router.post("/register", upload.single("avatar"), registerUser);
 
 6. User controller — `src/controllers/user.controller.js`
 
-This file defines HTTP handlers for user-related actions. Right now it implements **registration** (`registerUser`). Controllers sit between routes and services/utilities: they read `req`, validate input, call the database and Cloudinary, and send standardized JSON via `apiResponse` or throw `apiError` (handled by your global error middleware when wired).
+This controller handles user-related API logic. The `registerUser` function creates a new user, uploads profile images, and returns a safe response without sensitive fields.
 
-6.1 Imports (what each piece does)
+6.1 `registerUser` flow (simple explanation)
 
-| Import               | Role in this file                                                                                                                               |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `asyncHandler`       | Wraps `registerUser` so returned/rejected Promises become `next(err)` and you avoid repeating `try/catch` in the handler.                       |
-| `apiError`           | Thrown for expected failures (validation, conflict, server issues). Your error middleware should map these to HTTP responses.                   |
-| `User`               | Mongoose model used for `findOne`, `create`, and re-querying the saved user.                                                                    |
-| `uploadOnCloudinary` | Takes a **local disk path** (from Multer), uploads to Cloudinary, returns a result object with `.url` (or `null` on failure — see notes below). |
-| `apiResponse`        | Wraps success payloads in a consistent JSON shape (`statusCode`, `data`, `message`, `success`).                                                 |
+1. **Read request body**
+   - Gets `fullName`, `email`, `username`, and `password` from `req.body`.
 
-6.1.1 Syntax note: `req.files?.avatar?.[0]?.path`
+2. **Validate required fields**
+   - If any field is missing/empty, it throws `400` with `"All fields are required"`.
+   - It also checks basic email format (`email` contains `@`).
 
-This expression safely reads the **local temp file path** Multer stored for the first uploaded file in the `avatar` field. Read it from **left to right**:
+3. **Check existing user**
+   - Queries MongoDB with:
+     - same `username`, or
+     - same `email`
+   - If found, throws `409` conflict.
 
-| Part        | Meaning                                                                                                                                                                                                                     |
-| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `req.files` | Object Multer sets on the request when you use middleware like `upload.fields(...)`. Keys are **field names** from the form; values are **arrays** of file info objects (one entry per file for that field).                |
-| `?.`        | **Optional chaining.** If the value to the left is `null` or `undefined`, evaluation **stops** and the whole expression becomes `undefined` — no `TypeError` from reading a property off nothing.                           |
-| `.avatar`   | The uploaded field named `avatar` (must match the name in your form and in `upload.fields([{ name: "avatar", ... }])`).                                                                                                     |
-| `?.[0]`     | The first file in that field’s array. **`?.` before `[0]`** matters: with `req.files?.avatar[0]`, if `avatar` is missing you get `undefined[0]`, which **throws**. Writing `?.[0]` means “only index when `avatar` exists.” |
-| `?.path`    | Each Multer file object includes `path` (full path to the temp file on disk). Optional chaining covers a missing or malformed entry.                                                                                        |
+4. **Read uploaded files (from Multer)**
+   - `req.files?.avatar?.[0]?.path` -> local path of avatar image.
+   - `req.files?.coverImage?.[0]?.path` -> local path of cover image.
+   - Optional chaining (`?.`) prevents crashes if files are missing.
 
-**Equivalent idea in plain steps:** “If `req.files` exists, then if `avatar` exists, then if element `0` exists, return its `path`; otherwise `undefined`.”
+5. **Ensure avatar is provided**
+   - Avatar is mandatory in current logic.
+   - If avatar path is missing, throws `400`.
 
-**Contrast without optional chaining:** `req.files.avatar[0].path` assumes every step exists; any missing step crashes the request handler.
+6. **Upload images to Cloudinary**
+   - Uploads avatar (required).
+   - Uploads cover image only if provided.
+   - Uses returned Cloudinary URLs for database storage.
 
-6.2 `registerUser` — end-to-end flow (maps to comments at top of file)
+7. **Create user document**
+   - Saves user with:
+     - profile image URLs
+     - lowercased username
+     - password (hashed by model pre-save hook)
 
-The block comment at lines 7–15 is the checklist the handler implements:
+8. **Fetch safe user data**
+   - Re-queries user with:
+     - `.select("-password -refreshToken")`
+   - This ensures sensitive data is not returned.
 
-1. **Read body** — `fullName`, `email`, `username`, `password` from `req.body`. The client should send these as form fields (with `multipart/form-data` if files are included).
+9. **Send response**
+   - Returns success response with created user data.
 
-2. **Validate text fields** — Any of the four missing or whitespace-only triggers `400` with `"All fields are required"`. Email must contain `@` (`400` with `"correct email is required"`). This is a light check; you can later swap in a proper email validator or schema validation (e.g. Zod / express-validator).
+6.2 Why `req.files?.avatar?.[0]?.path` is used
 
-3. **Uniqueness** — `await User.findOne({ $or: [{ username }, { email }] })`. **Always `await`** here: without it you get a Promise, which is always truthy and would incorrectly block every registration. If a document exists → `409` `"User with same email or username already exist"`.
+- `req.files`: object created by Multer.
+- `.avatar`: files uploaded under `avatar` field.
+- `?.[0]`: first uploaded file in that field (safe access).
+- `?.path`: local temp file path.
+- Without `?.`, missing file fields can crash the request.
 
-4. **Files** — Reads Multer paths: `req.files?.avatar?.[0]?.path` and `req.files?.coverImage?.[0]?.path`. See **6.1.1** for a line-by-line explanation of that syntax.
+6.3 Route requirements
 
-5. **Avatar required** — If there is no `avatarLocalPath` → `400` `"Avatar file is required"`. Cover image is optional for the check; upload still runs for cover (see 6.4).
+- Multer middleware must run before `registerUser`.
+- Field names should match controller usage: `avatar`, `coverImage`.
+- Typical route:
 
-6. **Cloudinary** — Uploads avatar (required path) then cover (may be `undefined`). Stored URLs go into MongoDB on create.
+```js
+router.post(
+  "/register",
+  upload.fields([
+    { name: "avatar", maxCount: 1 },
+    { name: "coverImage", maxCount: 1 },
+  ]),
+  registerUser,
+);
+```
 
-7. **`User.create`** — Persists user with `avatar: avatar.url`, `coverImage: coverImage?.url || ""`, normalized `username: username.toLowerCase()`, and plain `password` (hashed by the User model `pre("save")` hook).
+6.4 Common failure cases
 
-8. **Re-fetch for response** — After create, the handler loads the user again and applies `.select("-password -refreshToken")` so the JSON never includes secrets. **Mongoose convention:** use the **model** for static queries, e.g. `User.findById(user._id)`, not `user.findById` on the document instance (`findById` is a Model method).
+- Missing form fields -> `400`
+- Invalid email format -> `400`
+- Duplicate email/username -> `409`
+- Avatar not uploaded -> `400`
+- DB create/fetch issue -> `500`
 
-9. **Response** — `201` HTTP status with `new apiResponse(200, createdUser, "User registered succesfully")`. Note: `res.status(201)` and the first argument to `apiResponse` (`200`) can disagree; consider using the same code in both places so clients and logs stay consistent.
+6.5 `generateAccessAndRefreshToken` flow (`user.controller.js`)
 
-6.3 What the route must provide
+This helper creates JWT tokens for a user and stores refresh token in DB.
 
-- **Multer (or equivalent)** must run before this handler so `req.files` and temp paths exist. Field names should match what the controller reads (`avatar`, `coverImage`). Example: `upload.fields([{ name: "avatar", maxCount: 1 }, { name: "coverImage", maxCount: 1 }])` on the register route.
-- **Body parser** for non-file fields when using multipart forms (often `express.urlencoded` plus Multer).
+1. **Find user by id**
+   - `const user = await User.findById(userId)`
 
-  6.4 Edge cases worth knowing
+2. **Generate tokens from model methods**
+   - `user.generateAccessToken()`
+   - `user.generaterefreshToken()`
 
-- **`uploadOnCloudinary` returns `null`** when `localFilePath` is falsy or upload fails (see `cloudinary.js`). If avatar upload fails, `avatar.url` can throw. A robust flow checks `if (!avatar?.url)` after upload and responds with `500` or `400` before `User.create`.
-- **Cover image omitted** — `uploadOnCloudinary(coverImageLocalPath)` receives `undefined` and returns `null` early; `coverImage?.url || ""` keeps the schema happy when cover is optional in the UI.
-- **Duplicate avatar check** — The file validates `avatarLocalPath` before and after upload; the second check is redundant and can be removed for clarity.
+3. **Store refresh token**
+   - Saves refresh token in user document:
+   - `user.refreshToken = refreshToken`
+   - `await user.save({ validateBeforeSave: false })`
 
-  6.5 Errors thrown (by status)
+4. **Return both tokens**
+   - Returns `{ accessToken, refreshToken }` to caller.
 
-| Situation                   | Typical status | Message (as in code)                           |
-| --------------------------- | -------------- | ---------------------------------------------- |
-| Missing/blank core fields   | 400            | All fields are required                        |
-| Email without `@`           | 400            | correct email is required                      |
-| Duplicate username/email    | 409            | User with same email or username already exist |
-| No avatar file              | 400            | Avatar file is required                        |
-| Re-query after create fails | 500            | something went wrong while registering User    |
+5. **Error handling**
+   - Any failure throws `apiError(500, "...generating access and refresh token")`.
 
-6.6 Exports
+6.6 `loginUser` flow (`user.controller.js`)
 
-- Only `registerUser` is exported today. Add named exports here as you implement login, profile update, etc., and import them from your user routes file.
+This handler logs in user using email or username, verifies password, sets cookies, and returns user + tokens.
+
+1. **Read body**
+   - Reads `email`, `username`, and `password` from `req.body`.
+
+2. **Validate identifier**
+   - If both `username` and `email` are missing -> throws `400`.
+
+3. **Find user**
+   - Uses `$or` query with username/email.
+   - If no user found -> throws `400` (`"User does not exist"`).
+
+4. **Validate password**
+   - If password missing -> throws `400`.
+   - Verifies with `await user.isPasswordCorrect(password)`.
+   - Wrong password -> throws `400`.
+
+5. **Generate tokens**
+   - Calls `generateAccessAndRefreshToken(user._id)`.
+
+6. **Fetch safe user data**
+   - Re-fetches user with `.select("-password -refreshToken")` before sending response.
+
+7. **Set secure cookies**
+   - Sets `accessToken` and `refreshToken` as cookies with:
+   - `{ httpOnly: true, secure: true }`
+
+8. **Send success response**
+   - Returns HTTP `200` with:
+   - user data
+   - access token
+   - refresh token
+
+6.7 Login route notes
+
+- To read cookies later, keep `cookie-parser` middleware enabled in app setup.
+- `secure: true` cookies are only sent over HTTPS (expected in production).
+- For local HTTP testing, you may need to conditionally set `secure` based on environment.
