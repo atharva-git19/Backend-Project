@@ -316,7 +316,7 @@ This controller handles user-related API logic. The `registerUser` function crea
 - `?.path`: local temp file path.
 - Without `?.`, missing file fields can crash the request.
 
-6.3 Route requirements
+  6.3 Route requirements
 
 - Multer middleware must run before `registerUser`.
 - Field names should match controller usage: `avatar`, `coverImage`.
@@ -341,7 +341,7 @@ router.post(
 - Avatar not uploaded -> `400`
 - DB create/fetch issue -> `500`
 
-6.5 `generateAccessAndRefreshToken` flow (`user.controller.js`)
+  6.5 `generateAccessAndRefreshToken` flow (`user.controller.js`)
 
 This helper creates JWT tokens for a user and stores refresh token in DB.
 
@@ -403,3 +403,75 @@ This handler logs in user using email or username, verifies password, sets cooki
 - To read cookies later, keep `cookie-parser` middleware enabled in app setup.
 - `secure: true` cookies are only sent over HTTPS (expected in production).
 - For local HTTP testing, you may need to conditionally set `secure` based on environment.
+
+  6.8 `logoutUser` flow (`src/controllers/user.controller.js`)
+
+This handler logs out the currently authenticated user by invalidating refresh token in DB and clearing auth cookies.
+
+1. **Protected route requirement**
+   - Logout route is mounted as:
+   - `userRouter.route("/logout").post(verifyJWT, logoutUser)`
+   - This means `verifyJWT` runs first, then `logoutUser`.
+
+2. **User identity comes from middleware**
+   - `logoutUser` uses `req.user._id`.
+   - `req.user` is not created inside controller; it is attached by `verifyJWT`.
+   - If middleware is removed, `req.user` will be undefined and logout cannot safely target correct user.
+
+3. **Invalidate refresh token in database**
+   - Controller calls:
+   - `User.findByIdAndUpdate(req.user._id, { $set: { refreshToken: undefined } }, { new: true })`
+   - This removes stored refresh token so old refresh token cannot be used to mint new access tokens.
+
+4. **Clear browser auth cookies**
+   - It clears both cookies:
+   - `accessToken`
+   - `refreshToken`
+   - Using options `{ httpOnly: true, secure: true }` to match secure cookie behavior.
+
+5. **Return success response**
+   - Sends `200` response with message `"User logged out"`.
+
+Why DB invalidation + cookie clearing both are used:
+
+- Clearing cookies logs out current browser session.
+- Removing refresh token from DB prevents token reuse if cookie/token was copied elsewhere.
+- Together they provide safer logout than just deleting client cookie.
+
+7. Auth middleware (`src/middlewares/auth.middleware.js`) and logout relationship
+
+`verifyJWT` middleware is the security gate that makes logout user-specific and safe.
+
+7.1 What `verifyJWT` does
+
+1. **Read token**
+   - First checks `req.cookies?.accessToken`.
+   - If not available, checks `Authorization` header and removes `"Bearer "` prefix.
+
+2. **Reject missing token**
+   - If no token, throws `401` unauthorized.
+
+3. **Verify JWT signature and expiry**
+   - Uses:
+   - `jwt.verify(token, process.env.ACCESS_TOKEN_SECRET)`
+   - If token is tampered/expired, verification fails and request is rejected.
+
+4. **Load current user**
+   - Finds user by decoded token `_id`.
+   - Excludes sensitive fields:
+   - `.select("-password -refreshToken")`
+
+5. **Attach user to request**
+   - Sets `req.user = user`.
+   - Calls `next()` so protected controller (like `logoutUser`) can run.
+
+7.2 How middleware is used during logout (request lifecycle)
+
+1. Client sends `POST /logout` with auth cookie/header.
+2. `verifyJWT` authenticates token and attaches `req.user`.
+3. `logoutUser` reads `req.user._id`.
+4. `logoutUser` removes refresh token from DB.
+5. `logoutUser` clears `accessToken` + `refreshToken` cookies.
+6. Server returns success response.
+
+Without step 2 (`verifyJWT`), controller cannot trust identity and could not securely log out the correct account.
